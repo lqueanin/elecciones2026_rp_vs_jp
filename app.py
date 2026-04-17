@@ -1,13 +1,11 @@
 import os
 import sqlite3
-import requests
-from flask import Flask, jsonify, render_template
-from apscheduler.schedulers.background import BackgroundScheduler
+from flask import Flask, jsonify, render_template, request
 from datetime import datetime
 
 app = Flask(__name__)
 
-# --- CONFIGURACIÓN DE LA BASE DE DATOS ---
+# Configuración de la base de datos en el volumen de Railway
 if os.path.exists('/data'):
     DB_PATH = '/data/elecciones.db'
 else:
@@ -33,47 +31,29 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- LÓGICA DE MONITOREO CON PROXY DE GOOGLE ---
-def actualizar_datos_onpe():
-    # PEGA AQUÍ LA URL QUE COPIASTE DE GOOGLE APPS SCRIPT
-    PROXY_URL = 'https://script.google.com/macros/s/AKfycbyFjvjFSM_FcQqKeliwSPZfqPivdmdvCLOFk2xogAhV_SItwO7hCaff7OHBZ7YY-Jc/exec' 
+@app.route('/api/push-votos', methods=['POST'])
+def recibir_votos():
+    # Token de seguridad para que solo el robot de GitHub pueda enviar datos
+    token = request.args.get('token')
+    if token != "unjbg_esis_2026":
+        return jsonify({"status": "error", "message": "No autorizado"}), 401
     
+    data = request.json
     try:
-        # Ya no necesitamos cloudscraper aquí porque Google hace el trabajo sucio
-        response = requests.get(PROXY_URL, timeout=30)
-        
-        if response.status_code == 200:
-            json_data = response.json()
-            if json_data.get('success') and json_data.get('data'):
-                datos = json_data['data']
-                rp = next((p for p in datos if p['codigoAgrupacionPolitica'] == 35), None)
-                jpp = next((p for p in datos if p['codigoAgrupacionPolitica'] == 10), None)
+        v_rp = data['votos_rp']
+        v_jpp = data['votos_jpp']
+        dif = abs(v_rp - v_jpp)
+        hora_actual = datetime.now().strftime('%H:%M')
 
-                if rp and jpp:
-                    v_rp = rp['totalVotosValidos']
-                    v_jpp = jpp['totalVotosValidos']
-                    dif = abs(v_rp - v_jpp)
-                    hora_actual = datetime.now().strftime('%H:%M')
-
-                    conn = get_db_connection()
-                    c = conn.cursor()
-                    c.execute('INSERT INTO historial_brecha (fecha, votos_rp, votos_jpp, diferencia) VALUES (?, ?, ?, ?)', 
-                              (hora_actual, v_rp, v_jpp, dif))
-                    conn.commit()
-                    conn.close()
-                    print(f"[{hora_actual}] Guardado mediante Proxy Google: Dif {dif}")
-        else:
-            print(f"Error en Proxy: {response.status_code}")
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('INSERT INTO historial_brecha (fecha, votos_rp, votos_jpp, diferencia) VALUES (?, ?, ?, ?)', 
+                  (hora_actual, v_rp, v_jpp, dif))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "hora": hora_actual})
     except Exception as e:
-        print(f"Fallo en la conexión al Proxy: {e}")
-
-# --- INICIALIZACIÓN ---
-init_db()
-scheduler = BackgroundScheduler()
-if not scheduler.get_jobs():
-    scheduler.add_job(func=actualizar_datos_onpe, trigger="interval", minutes=5)
-    scheduler.start()
-    actualizar_datos_onpe()
+        return jsonify({"status": "error", "message": str(e)}), 400
 
 @app.route('/')
 def index():
@@ -82,7 +62,7 @@ def index():
 @app.route('/api/historial')
 def obtener_historial():
     try:
-        conn = get_db_connection() # Corregido para usar la función de conexión
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute('SELECT fecha, votos_rp, votos_jpp, diferencia FROM historial_brecha ORDER BY id ASC')
         filas = c.fetchall()
@@ -91,6 +71,8 @@ def obtener_historial():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+init_db()
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=port)
