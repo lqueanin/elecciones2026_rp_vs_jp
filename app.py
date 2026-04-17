@@ -1,14 +1,14 @@
-from flask import Flask, jsonify, render_template
+import os
 import sqlite3
-import requests
+import cloudscraper
+from flask import Flask, jsonify, render_template
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
-import os
 
 app = Flask(__name__)
 
 # --- CONFIGURACIÓN DE LA BASE DE DATOS ---
-# Si existe la carpeta /data (volumen de Railway), lo usamos. 
+# Si existe la carpeta /data (volumen de Railway), la usamos.
 # Si no, usamos la carpeta local (tu PC).
 if os.path.exists('/data'):
     DB_PATH = '/data/elecciones.db'
@@ -16,11 +16,13 @@ else:
     DB_PATH = 'elecciones.db'
 
 def get_db_connection():
+    """Establece la conexión usando la ruta global corregida."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
+    """Crea la tabla si no existe al arrancar la app."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('''
@@ -35,100 +37,75 @@ def init_db():
     conn.commit()
     conn.close()
 
-# 2. Tarea en segundo plano: Consultar ONPE y guardar en SQLite
+# --- LÓGICA DE MONITOREO (SCRAPPING) ---
 def actualizar_datos_onpe():
     url = 'https://resultadoelectoral.onpe.gob.pe/presentacion-backend/resumen-general/participantes?idEleccion=10&tipoFiltro=eleccion'
     try:
-        # Cabeceras avanzadas para simular un navegador real (Google Chrome en Windows)
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'es-PE,es;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Referer': 'https://resultadoelectoral.onpe.gob.pe/elecciones2026/', # Cambia el año si es necesario
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin'
-        }
+        # Usamos cloudscraper para evitar bloqueos de la ONPE
+        scraper = cloudscraper.create_scraper()
+        response = scraper.get(url, timeout=15)
         
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        # Validamos si la respuesta HTTP es exitosa (200 OK)
         if response.status_code == 200:
-            try:
-                json_data = response.json()
-            except ValueError:
-                print("Error: La respuesta fue 200 OK, pero no es un JSON válido.")
-                return
-
+            json_data = response.json()
             if json_data.get('success') and json_data.get('data'):
                 datos = json_data['data']
+                
+                # Buscamos los partidos específicos por código
                 rp = next((p for p in datos if p['codigoAgrupacionPolitica'] == 35), None)
                 jpp = next((p for p in datos if p['codigoAgrupacionPolitica'] == 10), None)
 
                 if rp and jpp:
-                    votos_rp = rp['totalVotosValidos']
-                    votos_jpp = jpp['totalVotosValidos']
-                    diferencia = abs(votos_rp - votos_jpp)
-                    ahora = datetime.now().strftime('%H:%M')
+                    v_rp = rp['totalVotosValidos']
+                    v_jpp = jpp['totalVotosValidos']
+                    dif = abs(v_rp - v_jpp)
+                    hora_actual = datetime.now().strftime('%H:%M')
 
-                    # Guardar en base de datos
-                    conn = sqlite3.connect(DB_NAME)
+                    # Guardar en la base de datos
+                    conn = get_db_connection()
                     c = conn.cursor()
                     c.execute('''
                         INSERT INTO historial_brecha (fecha, votos_rp, votos_jpp, diferencia)
                         VALUES (?, ?, ?, ?)
-                    ''', (ahora, votos_rp, votos_jpp, diferencia))
+                    ''', (hora_actual, v_rp, v_jpp, dif))
                     conn.commit()
                     conn.close()
-                    print(f"[{ahora}] Datos actualizados. Diferencia: {diferencia}")
+                    print(f"[{hora_actual}] Datos actualizados: Dif {dif}")
         else:
-            print(f"Error HTTP {response.status_code}: La ONPE bloqueó la petición.")
-            # Descomenta la siguiente línea si quieres ver el HTML que te están enviando para bloquearte:
-            # print(response.text[:200]) 
+            print(f"Error HTTP {response.status_code} al consultar la ONPE")
+    except Exception as e:
+        print(f"Error en la tarea de monitoreo: {e}")
 
-    except requests.exceptions.RequestException as e:
-        print(f"Error de conexión: {e}")
+# --- INICIALIZACIÓN AUTOMÁTICA (Para Gunicorn y Local) ---
+# Esto se ejecuta siempre que la app se carga
+init_db()
+scheduler = BackgroundScheduler()
+# Solo añadimos el job si no está ya activo
+if not scheduler.get_jobs():
+    scheduler.add_job(func=actualizar_datos_onpe, trigger="interval", minutes=5)
+    scheduler.start()
+    # Primera ejecución manual para no esperar 5 minutos
+    actualizar_datos_onpe()
 
-# 3. Endpoints de Flask
+# --- RUTAS DE FLASK ---
 @app.route('/')
 def index():
-    # Sirve el archivo index.html de la carpeta templates
     return render_template('index.html')
 
 @app.route('/api/historial')
 def obtener_historial():
-    # Devuelve todos los registros de la base de datos al frontend
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('SELECT fecha, votos_rp, votos_jpp, diferencia FROM historial_brecha ORDER BY id ASC')
-    filas = c.fetchall()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT fecha, votos_rp, votos_jpp, diferencia FROM historial_brecha ORDER BY id ASC')
+        filas = c.fetchall()
+        conn.close()
+        # Convertimos los resultados a una lista de diccionarios para JSON
+        return jsonify([dict(fila) for fila in filas])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    # Formatear a JSON
-    resultado = []
-    for fila in filas:
-        resultado.append({
-            'hora': fila[0],
-            'votos_rp': fila[1],
-            'votos_jpp': fila[2],
-            'diferencia': fila[3]
-        })
-    
-    return jsonify(resultado)
-
-# 4. Arrancar la aplicación y el Scheduler
+# --- SOLO PARA EJECUCIÓN LOCAL ---
 if __name__ == '__main__':
-    init_db()
-    
-    # Hacemos una primera consulta inmediata al arrancar el server
-    actualizar_datos_onpe() 
-    
-    # Configuramos el scheduler para que corra cada 5 minutos
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(func=actualizar_datos_onpe, trigger="interval", minutes=5)
-    scheduler.start()
-
-    # Desactivar el recargo automático (use_reloader=False) es importante 
-    # para que el scheduler no se ejecute dos veces en modo desarrollo
-    app.run(debug=True, use_reloader=False, port=5000)
+    # Railway usa la variable de entorno PORT automáticamente
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
