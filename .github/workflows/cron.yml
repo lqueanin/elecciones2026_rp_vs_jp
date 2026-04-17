@@ -1,0 +1,19 @@
+name: Monitor Electoral Automático
+
+on:
+  schedule:
+    - cron: '*/10 * * * *' # Ejecuta cada 10 minutos
+  workflow_dispatch: # Permite ejecutarlo manualmente desde la web de GitHub
+
+jobs:
+  scrape_and_push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Instalar requests
+        run: pip install requests
+      - name: Ejecutar Robot
+        run: python bot_votos.py
