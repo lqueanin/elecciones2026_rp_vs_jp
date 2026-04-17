@@ -2,7 +2,7 @@ import requests
 import sys
 
 # 1. Asegúrate de que esta URL sea la de tu app de Railway
-URL_RAILWAY = "https://tu-app-production.up.railway.app/api/push-votos?token=unjbg_esis_2026"
+URL_RAILWAY = "https://web-production-76138.up.railway.app/api/push-votos?token=unjbg_esis_2026"
 URL_ONPE = "https://resultadoelectoral.onpe.gob.pe/presentacion-backend/resumen-general/participantes?idEleccion=10&tipoFiltro=eleccion"
 
 def ejecutar_robot():
