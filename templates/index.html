@@ -1,110 +1,43 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Brecha Electoral: RP vs JPP</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8f9fa; color: #333; text-align: center; padding: 20px; }
-        .dashboard { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .candidatos { display: flex; justify-content: space-around; margin-bottom: 20px; }
-        .tarjeta { padding: 15px; border-radius: 8px; width: 40%; background: #e9ecef; }
-        .tarjeta h3 { margin: 0 0 10px 0; font-size: 1.1em; color: #495057; }
-        .votos { font-size: 1.8em; font-weight: bold; color: #0056b3; }
-        .brecha-container { margin: 20px 0; padding: 15px; background: #fff3cd; border-radius: 8px; border: 1px solid #ffe69c; }
-        .brecha-valor { font-size: 2em; font-weight: bold; color: #b30000; }
-        canvas { max-width: 100%; margin-top: 20px; }
-    </style>
-</head>
-<body>
+async function cargarDatos() {
+    const ONPE_URL = 'https://resultadoelectoral.onpe.gob.pe/presentacion-backend/resumen-general/participantes?idEleccion=10&tipoFiltro=eleccion';
+    const PROXY = 'https://api.allorigins.win/get?url=';
 
-<div class="dashboard">
-    <h2>Evolución de Brecha Electoral</h2>
+    try {
+        // 1. El navegador (tu IP limpia) intenta bajar los datos de la ONPE
+        const resProxy = await fetch(PROXY + encodeURIComponent(ONPE_URL));
+        const jsonProxy = await resProxy.json();
+        const onpeData = JSON.parse(jsonProxy.contents);
+
+        if (onpeData.success) {
+            const rp = onpeData.data.find(p => p.codigoAgrupacionPolitica == 35);
+            const jpp = onpeData.data.find(p => p.codigoAgrupacionPolitica == 10);
+
+            // 2. "Donamos" el dato al servidor de Railway para guardarlo en la DB
+            await fetch('/api/push-votos?token=unjbg_esis_2026', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    votos_rp: rp.totalVotosValidos,
+                    votos_jpp: jpp.totalVotosValidos
+                })
+            });
+        }
+    } catch (e) {
+        console.log("No se pudo actualizar desde el cliente, cargando historial...");
+    }
+
+    // 3. Finalmente, cargamos el historial de la base de datos para mostrar la gráfica
+    const resDB = await fetch('/api/historial');
+    const historial = await resDB.json();
     
-    <div class="candidatos">
-        <div class="tarjeta">
-            <h3>RENOVACIÓN POPULAR</h3>
-            <div class="votos" id="votos-rp">Cargando...</div>
-        </div>
-        <div class="tarjeta">
-            <h3>JUNTOS POR EL PERÚ</h3>
-            <div class="votos" id="votos-jpp">Cargando...</div>
-        </div>
-    </div>
+    if (historial.length > 0) {
+        const ultimo = historial[historial.length - 1];
+        document.getElementById('votos-rp').innerText = ultimo.votos_rp.toLocaleString('es-PE');
+        document.getElementById('votos-jpp').innerText = ultimo.votos_jpp.toLocaleString('es-PE');
+        document.getElementById('diferencia-votos').innerText = ultimo.diferencia.toLocaleString('es-PE') + " votos";
 
-    <div class="brecha-container">
-        <div>Diferencia actual:</div>
-        <div class="brecha-valor" id="diferencia-votos">0 votos</div>
-    </div>
-
-    <canvas id="graficoBrecha"></canvas>
-</div>
-
-<script>
-    let chartBrecha;
-
-    function renderizarGrafico(etiquetas, datos) {
-        const ctx = document.getElementById('graficoBrecha').getContext('2d');
-        
-        // Si el gráfico ya existe, lo destruimos para redibujarlo actualizado
-        if (chartBrecha) {
-            chartBrecha.destroy();
-        }
-
-        chartBrecha = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: etiquetas,
-                datasets: [{
-                    label: 'Diferencia de Votos (RP vs JPP)',
-                    data: datos,
-                    borderColor: '#dc3545',
-                    backgroundColor: 'rgba(220, 53, 69, 0.2)',
-                    borderWidth: 2,
-                    fill: true,
-                    tension: 0.1
-                }]
-            },
-            options: {
-                responsive: true,
-                scales: { y: { beginAtZero: false } },
-                animation: { duration: 0 } // Desactiva animación en recargas para que no parpadee
-            }
-        });
+        const etiquetas = historial.map(h => h.fecha);
+        const datos = historial.map(h => h.diferencia);
+        renderizarGrafico(etiquetas, datos);
     }
-
-    async function cargarDatos() {
-        try {
-            // Consultamos nuestro propio backend
-            const respuesta = await fetch('/api/historial');
-            const historial = await respuesta.json();
-
-            if (historial.length > 0) {
-                // Tomamos el último registro para actualizar los contadores superiores
-                const ultimoRegistro = historial[historial.length - 1];
-                
-                document.getElementById('votos-rp').innerText = ultimoRegistro.votos_rp.toLocaleString('es-PE');
-                document.getElementById('votos-jpp').innerText = ultimoRegistro.votos_jpp.toLocaleString('es-PE');
-                document.getElementById('diferencia-votos').innerText = ultimoRegistro.diferencia.toLocaleString('es-PE') + " votos";
-
-                // Preparamos los arreglos para Chart.js
-                const etiquetas = historial.map(item => item.hora);
-                const datos = historial.map(item => item.diferencia);
-
-                renderizarGrafico(etiquetas, datos);
-            }
-        } catch (error) {
-            console.error("Error al cargar el historial:", error);
-        }
-    }
-
-    window.onload = () => {
-        cargarDatos();
-        // El frontend solo recarga la vista cada 5 minutos leyendo nuestra DB
-        setInterval(cargarDatos, 5 * 60 * 1000); 
-    };
-</script>
-
-</body>
-</html>
+}
