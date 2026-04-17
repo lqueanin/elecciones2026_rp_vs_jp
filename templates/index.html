@@ -77,58 +77,66 @@
     // Función principal: Scraping desde el cliente + Guardado en DB
     async function cargarDatos() {
         const ONPE_URL = 'https://resultadoelectoral.onpe.gob.pe/presentacion-backend/resumen-general/participantes?idEleccion=10&tipoFiltro=eleccion';
-        const PROXY = 'https://api.allorigins.win/get?url=';
-
-        try {
-            document.getElementById('status-update').innerText = "Consultando ONPE...";
-            
-            // 1. Obtenemos los datos usando tu IP actual (que no está bloqueada)
-            const resProxy = await fetch(PROXY + encodeURIComponent(ONPE_URL));
-            const jsonProxy = await resProxy.json();
-            const onpeData = JSON.parse(jsonProxy.contents);
-
-            if (onpeData.success && onpeData.data) {
-                // Filtramos los partidos
-                const rp = onpeData.data.find(p => p.codigoAgrupacionPolitica == 35);
-                const jpp = onpeData.data.find(p => p.codigoAgrupacionPolitica == 10);
-
-                if (rp && jpp) {
-                    // 2. Enviamos el dato a Railway para que lo guarde en la base de datos
-                    await fetch('/api/push-votos?token=unjbg_esis_2026', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            votos_rp: rp.totalVotosValidos,
-                            votos_jpp: jpp.totalVotosValidos
-                        })
-                    });
-                    document.getElementById('status-update').innerText = "Datos sincronizados con éxito.";
-                }
-            }
-        } catch (error) {
-            console.error("Error en la actualización en vivo:", error);
-            document.getElementById('status-update').innerText = "Cargando historial desde el servidor...";
-        }
-
-        // 3. Consultamos el historial completo de la base de datos para mostrarlo
-        try {
-            const respuesta = await fetch('/api/historial');
-            const historial = await respuesta.json();
-
-            if (historial.length > 0) {
-                const ultimo = historial[historial.length - 1];
+        
+        // Lista de proxies para rotar si uno falla
+        const PROXIES = [
+            'https://api.allorigins.win/get?url=',
+            'https://corsproxy.io/?',
+            'https://thingproxy.freeboard.io/fetch/'
+        ];
+    
+        let onpeData = null;
+    
+        // Intentamos con cada proxy hasta que uno funcione
+        for (let proxy of PROXIES) {
+            try {
+                console.log("Intentando con proxy:", proxy);
+                const res = await fetch(proxy + encodeURIComponent(ONPE_URL));
                 
-                document.getElementById('votos-rp').innerText = ultimo.votos_rp.toLocaleString('es-PE');
-                document.getElementById('votos-jpp').innerText = ultimo.votos_jpp.toLocaleString('es-PE');
-                document.getElementById('diferencia-votos').innerText = ultimo.diferencia.toLocaleString('es-PE') + " votos";
-
-                const etiquetas = historial.map(item => item.fecha);
-                const datos = historial.map(item => item.diferencia);
-
-                renderizarGrafico(etiquetas, datos);
+                if (proxy.includes('allorigins')) {
+                    const json = await res.json();
+                    onpeData = JSON.parse(json.contents);
+                } else {
+                    onpeData = await res.json();
+                }
+    
+                if (onpeData && onpeData.success) {
+                    console.log("¡Éxito con!", proxy);
+                    break; // Si funcionó, salimos del bucle
+                }
+            } catch (e) {
+                console.warn("Falló el proxy " + proxy + ", intentando el siguiente...");
             }
-        } catch (error) {
-            console.error("Error al cargar el historial de la DB:", error);
+        }
+    
+        // Si logramos obtener datos, los "empujamos" a Railway
+        if (onpeData && onpeData.success) {
+            const rp = onpeData.data.find(p => p.codigoAgrupacionPolitica == 35);
+            const jpp = onpeData.data.find(p => p.codigoAgrupacionPolitica == 10);
+    
+            await fetch('/api/push-votos?token=unjbg_esis_2026', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    votos_rp: rp.totalVotosValidos,
+                    votos_jpp: jpp.totalVotosValidos
+                })
+            });
+        }
+    
+        // Finalmente, cargamos el historial de la DB para mostrar la gráfica
+        const resDB = await fetch('/api/historial');
+        const historial = await resDB.json();
+        
+        if (historial.length > 0) {
+            const ultimo = historial[historial.length - 1];
+            document.getElementById('votos-rp').innerText = ultimo.votos_rp.toLocaleString('es-PE');
+            document.getElementById('votos-jpp').innerText = ultimo.votos_jpp.toLocaleString('es-PE');
+            document.getElementById('diferencia-votos').innerText = ultimo.diferencia.toLocaleString('es-PE') + " votos";
+    
+            const etiquetas = historial.map(h => h.fecha);
+            const datos = historial.map(h => h.diferencia);
+            renderizarGrafico(etiquetas, datos);
         }
     }
 
